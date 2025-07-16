@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 from urllib.parse import urlparse
 import sqlite3
+import shutil
 
 # Configuração da página
 st.set_page_config(
@@ -22,6 +23,31 @@ DB_PATH = "downloads.db"
 # Criar diretório de downloads se não existir
 if not os.path.exists(DOWNLOADS_DIR):
     os.makedirs(DOWNLOADS_DIR)
+
+# Encontrar FFmpeg
+def find_ffmpeg():
+    """Encontra o caminho do FFmpeg no sistema"""
+    ffmpeg_path = shutil.which('ffmpeg')
+    ffprobe_path = shutil.which('ffprobe')
+    
+    if ffmpeg_path and ffprobe_path:
+        return os.path.dirname(ffmpeg_path)
+    
+    # Caminhos comuns do FFmpeg
+    common_paths = [
+        '/usr/bin',
+        '/usr/local/bin',
+        '/opt/homebrew/bin',
+        '/home/runner/.nix-profile/bin'
+    ]
+    
+    for path in common_paths:
+        if os.path.exists(os.path.join(path, 'ffmpeg')) and os.path.exists(os.path.join(path, 'ffprobe')):
+            return path
+    
+    return None
+
+FFMPEG_PATH = find_ffmpeg()
 
 # Inicializar banco de dados
 def init_db():
@@ -164,23 +190,47 @@ def download_video(download_id, format_type):
                 except:
                     pass
         
+        # Configuração básica do yt-dlp
+        base_opts = {
+            'outtmpl': os.path.join(DOWNLOADS_DIR, '%(title)s.%(ext)s'),
+            'noplaylist': True,
+            'progress_hooks': [progress_hook],
+        }
+        
+        # Adicionar caminho do FFmpeg se disponível
+        if FFMPEG_PATH:
+            base_opts['ffmpeg_location'] = FFMPEG_PATH
+        
         if format_type == 'audio':
             ydl_opts = {
-                'outtmpl': os.path.join(DOWNLOADS_DIR, '%(title)s.%(ext)s'),
+                **base_opts,
                 'format': 'bestaudio/best',
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
-                'progress_hooks': [progress_hook],
             }
         else:
-            ydl_opts = {
-                'outtmpl': os.path.join(DOWNLOADS_DIR, '%(title)s.%(ext)s'),
-                'format': 'best[ext=mp4][height<=720]/best[ext=mp4]/best',
-                'progress_hooks': [progress_hook],
-            }
+            # Configuração especial para Instagram
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT platform FROM downloads WHERE id = ?", (download_id,))
+            platform_result = cursor.fetchone()
+            conn.close()
+            
+            platform = platform_result[0] if platform_result else 'unknown'
+            
+            if platform == 'instagram':
+                ydl_opts = {
+                    **base_opts,
+                    'format': 'best',
+                }
+            else:
+                ydl_opts = {
+                    **base_opts,
+                    'format': 'best[ext=mp4][height<=720]/best[ext=mp4]/best[height<=720]/best',
+                }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
